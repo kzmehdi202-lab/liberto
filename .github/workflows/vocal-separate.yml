@@ -1,0 +1,57 @@
+name: Vocal Separation (Demucs)
+
+on:
+  push:
+    paths:
+      - 'audio_jobs/**'
+
+jobs:
+  separate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find new upload
+        id: find
+        run: |
+          f=$(git diff-tree --no-commit-id -r --name-only HEAD 2>/dev/null | grep -E '\.(m4a|mp3|wav|aac|ogg|3gp)$' | head -n 1 || true)
+          if [ -z "$f" ]; then
+            f=$(ls -t audio_jobs/*.m4a audio_jobs/*.mp3 audio_jobs/*.wav audio_jobs/*.aac audio_jobs/*.ogg audio_jobs/*.3gp 2>/dev/null | head -n 1)
+          fi
+          if [ -z "$f" ]; then echo "no audio input found"; exit 1; fi
+          echo "input=$f" | tee -a "$GITHUB_OUTPUT"
+          base=$(basename "$f")
+          echo "stem=${base%.*}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Demucs (CPU)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install demucs
+
+      - name: Separate vocals
+        run: |
+          demucs -n htdemucs --two-stems=vocals -d cpu -o sep "${{ steps.find.outputs.input }}"
+
+      - name: Publish results
+        run: |
+          stem="${{ steps.find.outputs.stem }}"
+          mkdir -p results
+          ffmpeg -y -i "sep/htdemucs/$stem/vocals.wav" -c:a aac -b:a 192k "results/${stem}_vocals.m4a"
+          ffmpeg -y -i "sep/htdemucs/$stem/no_vocals.wav" -c:a aac -b:a 192k "results/${stem}_accompaniment.m4a"
+          git config user.name "liberto-audio"
+          git config user.email "liberto-audio@users.noreply.github.com"
+          git add results/
+          git commit -m "results: $stem"
+          git push origin HEAD:main
